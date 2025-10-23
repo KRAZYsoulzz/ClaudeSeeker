@@ -1,0 +1,1617 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
+  <meta http-equiv="Pragma" content="no-cache"/>
+  <meta http-equiv="Expires" content="0"/>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
+  <link rel="manifest" href="/manifest.json">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0b1224">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <title>Earnings Tracker — Web</title>
+  <link rel="stylesheet" href="style.v43.ui.7-cb2.css?v=3014"/>
+  <link rel="stylesheet" href="print.css?v=3014" media="print"/>
+  <script>
+// --- Pre-hydration bootstrap: run before app bundle hydrates ---
+(function(){
+  var p = function(n){ return String(n).padStart(2,'0'); };
+  function todayLocalISO(){
+    var d = new Date(); return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate());
+  }
+  function normYMD(d){
+    if (typeof d === 'string'){
+      var m = d.match(/^(\d{4})-(\d{2})-(\d{2})$/); if (m) return d;
+      m = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); if (m) return m[3]+"-"+p(+m[1])+"-"+p(+m[2]);
+    }
+    if (d && d.year && d.month && d.day){ return d.year+"-"+p(d.month)+"-"+p(d.day); }
+    var x = new Date(); return x.getFullYear()+"-"+p(x.getMonth()+1)+"-"+p(x.getDate());
+  }
+  function getJSON(k){ try{ var v = localStorage.getItem(k); return v?JSON.parse(v):null; }catch(e){ return null; } }
+  function setJSON(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} }
+  function cloneTicket(t){
+    if(!t) return null;
+    function cA(a){ return Array.isArray(a)? a.map(function(o){ return Object.assign({}, o); }):[]; }
+    var T = { date: t.date, items: cA(t.items), addons: cA(t.addons), expenses: cA(t.expenses), engineer: t.engineer||null, notes: t.notes||"", totals: t.totals? Object.assign({}, t.totals): {subtotal:0,tax:0,total:0} };
+    // Ensure each item's addons is cloned
+    T.items = T.items.map(function(it){ it = Object.assign({}, it); it.addons = cA(it.addons); return it; });
+    return T;
+  }
+
+  // Remember last selected date, default to today
+  var sel = null;
+  try{ sel = sessionStorage.getItem('ui_selectedDate'); }catch(e){}
+  sel = normYMD(sel || todayLocalISO());
+  try{ sessionStorage.setItem('ui_selectedDate', sel); }catch(e){}
+  window.__forceInitDate = sel; // for later phases
+
+  // Seed base key et_ticket_v14 with the selected day before the app reads it
+  var baseKey = 'et_ticket_v14';
+  var scopedKey = baseKey + '::' + sel;
+  var scopedTicket = getJSON(scopedKey);
+  if (!scopedTicket){
+    // try build from history
+    var hist = getJSON('et_history_v14') || [];
+    if (Array.isArray(hist)){
+      for (var i=0;i<hist.length;i++){
+        var h = hist[i]||{};
+        var d = h.date || h.day || (h.ticket && h.ticket.date);
+        if (normYMD(d) === sel){
+          scopedTicket = { date: sel, items: (h.items||h.services||h.claims||[]), addons: [], expenses: [], engineer: null, notes:"", totals: h.totals||{subtotal:0,tax:0,total:0} };
+          break;
+        }
+      }
+    }
+  }
+  if (!scopedTicket){
+    scopedTicket = { date: sel, items: [], addons: [], expenses: [], engineer: null, notes: "", totals: {subtotal:0,tax:0,total:0} };
+  }
+  setJSON(baseKey, cloneTicket(scopedTicket)); // <- this is what the app will hydrate first
+
+  // One-time HISTORY NORMALIZE + MERGE per-day tickets
+  try{
+    var hist = getJSON('et_history_v14'); if (!Array.isArray(hist)) hist = [];
+    // Merge per-day scoped tickets
+    for (var i=0;i<localStorage.length;i++){
+      var k = localStorage.key(i);
+      if (!k) continue;
+      var m = k.match(/^et_ticket_v14::(\d{4}-\d{2}-\d{2})$/);
+      if (!m) continue;
+      var dt = m[1];
+      var tk = getJSON(k);
+      if (!tk || !Array.isArray(tk.items)) continue;
+      // Build/replace history entry for that date
+      var entry = {
+        id: (self.crypto && crypto.randomUUID)? crypto.randomUUID() : String(Date.now() + i),
+        date: dt,
+        jobs: tk.items.length ? 1 : 0,
+        servicesCount: tk.items.length,
+        addonsCount: tk.items.reduce(function(a,it){ return a + (Array.isArray(it.addons)? it.addons.length:0); }, 0),
+        grandTotal: tk.items.reduce(function(sum,it){
+          var add = (Array.isArray(it.addons)? it.addons.reduce(function(x,y){ return x + ((+y.price||0) * (+y.qty||1)); },0):0);
+          return sum + ((+it.price||0) * (+it.qty||1)) + add;
+        }, 0),
+        items: tk.items,
+        expenses: Array.isArray(tk.expenses)? tk.expenses: [],
+        odoStart: 0, odoEnd: 0
+      };
+      // upsert by date
+      var idx = hist.findIndex(function(h){ var d=(h&& (h.date||h.day||(h.ticket&&h.ticket.date))); return d===dt; });
+      if (idx>=0) hist[idx] = entry; else hist.push(entry);
+    }
+    // Deduplicate by date and sort DESC
+    var map = {};
+    for (var j=0;j<hist.length;j++){
+      var h = hist[j]||{};
+      var d = (h.date||h.day||(h.ticket&&h.ticket.date)||'').toString();
+      if (!d) continue;
+      map[d] = h; // last one wins
+    }
+    var arr = Object.keys(map).map(function(d){ return map[d]; });
+    arr.sort(function(a,b){
+      function parse(x){ var dd=(x.date||x.day||(x.ticket&&x.ticket.date)||'1970-01-01').split('-'); return new Date(+dd[0], +dd[1]-1, +dd[2]); }
+      return parse(b) - parse(a);
+    });
+    localStorage.setItem('et_history_v14', JSON.stringify(arr));
+  }catch(e){}
+})();
+</script>
+<script defer src="https://cdn.js?v=3014delivr.net/npm/gotrue-js@2/dist/gotrue.min.js?v=3014"></script>
+<script>try{ localStorage.setItem('et_lastSeenVersion', JSON.stringify('V3.0.14')); }catch(_){ }; window.APP_VERSION='V3.0.14';</script>
+<style>#changelogModal,#changelogBackdrop{display:none!important;visibility:hidden!important;opacity:0!important;}</style>
+
+<style>
+  #changelogBackdrop, #changelogModal { display:none !important; visibility:hidden !important; opacity:0 !important; pointer-events:none !important; }
+</style>
+
+<style>
+  #appVersionBadge { position:fixed; right:8px; bottom:8px; z-index:99999;
+    background:rgba(0,0,0,.65); color:#fff; padding:4px 8px; border-radius:8px;
+    font:600 12px/1.2 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    letter-spacing:.3px; pointer-events:none; display:block !important; }
+</style>
+
+<style id="badgeForceV3014">
+  #appVersionBadge{position:fixed;right:8px;bottom:8px;z-index:99999;
+    background:rgba(0,0,0,.65);color:#fff;padding:4px 8px;border-radius:8px;
+    font:600 12px/1.2 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    letter-spacing:.3px;pointer-events:none;display:block !important;visibility:visible !important;opacity:1 !important;}
+  #versionBadge, .version-badge, [data-version-badge]{display:none !important;visibility:hidden !important;opacity:0 !important;}
+</style>
+<style id="overlayFixV3014">
+  #changelogBackdrop, #changelogModal { display:none !important; visibility:hidden !important; opacity:0 !important; pointer-events:none !important; }
+</style>
+
+  <style>
+
+    .version-badge-fix {
+      position: fixed !important;
+      right: max(12px, env(safe-area-inset-right)) !important;
+      bottom: max(12px, env(safe-area-inset-bottom)) !important;
+      z-index: 2147483646 !important;
+    }
+    @supports not (bottom: env(safe-area-inset-bottom)) {
+      .version-badge-fix { right: 12px !important; bottom: 12px !important; }
+    }
+  </style>
+
+</head>
+<body>
+<div id="appVersionBadge" aria-label="\g<1>3.0.26" style="position:fixed;right:calc(env(safe-area-inset-right,0px) + 14px);bottom:calc(env(safe-area-inset-bottom,0px) + 16px);z-index:2147483646;background:rgba(0,0,0,.72);color:#fff;padding:4px 10px;border-radius:10px;font:600 12px/1.2 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;letter-spacing:.3px;pointer-events:none;display:block;visibility:visible;opacity:1;">V3.0.34-hooks6-ios1</div>
+
+<div id="changelogBackdrop" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10000;"></div>
+<div id="changelogModal" style="display:none;position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:10001;background:#fff;color:#111;max-width:520px;width:92vw;border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.35);">
+  <div style="padding:16px 16px 0;">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+      <h3 style="margin:0;font-size:18px;font-weight:800;">What’s new in V3.0.1</h3>
+      <button id="clCloseX" aria-label="Close" style="border:none;background:transparent;font-size:18px;line-height:1;padding:4px 8px;cursor:pointer;">×</button>
+    </div>
+    <div style="font-size:13px;color:#444;margin-top:6px;margin-bottom:8px">
+      These changes show once after update. You can see them anytime in Backup → Export JSON (the file includes version info).
+    </div>
+  </div>
+  <div style="padding:0 16px 8px;">
+
+<ul style="margin:0 0 6px 18px;line-height:1.45">
+  <li><b>Inline button layout</b> — Action buttons on the main card are now on the same row as the pill counter for a cleaner look.</li>
+  <li><b>Gold “+” icon</b> — Replaced the emoji with a vector icon we can style, set to our gold theme.</li>
+  <li><b>Consistent button styling</b> — Buttons now match the app’s theme colors, spacing, and rounded corners.</li>
+  <li><b>Version badge cleanup</b> — Shows only one version number in the corner using the new format.</li>
+  <li><b>Backup & Restore (JSON)</b> — Export/import all data; merge safely with existing entries and undo last import.</li>
+  <li><b>Backup page layout</b> — Clearer labels and directions so it’s easier to use.</li>
+</ul>
+
+  </div>
+  <div style="padding:10px 16px 16px;display:flex;justify-content:flex-end;gap:8px;">
+    <button id="clOk" style="padding:10px 14px;border-radius:10px;border:1px solid #d0d7de;background:#f6f8fa;cursor:pointer;">Got it</button>
+  </div>
+</div>
+
+  <header class="appbar">
+    <h1>Today's Earnings</h1>
+    <nav class="tabs">
+      <button class="tab active" data-tab="ticket" title="Ticket">🧾 <span>Today</span></button>
+      <button class="tab" data-tab="history" title="History">📖 <span>History</span></button>
+      <button class="tab" data-tab="carriers" title="Carrier Billables">📊 <span>Billables</span></button>
+          <button class="tab" data-tab="backup" title="Backup">☁️ <span>Backup</span></button>
+    </nav>
+</header>
+
+  <main class="layout">
+    <aside class="catalog card">
+      <h2>Services</h2>
+      <div class="catalogActions"><button id="addCustomBtn">+ Custom Service</button></div>
+      <div id="serviceList" class="list"></div>
+      <button id="addTarpBtn" class="cta">+ Add Tarp</button>
+    </aside>
+
+    <section class="workspace">
+      <section class="ticket card tabpanel" data-panel="ticket">
+        <div class="centerHeader">
+          <div class="dateRow" id="dateRowText"></div>
+          <div class="earnings">
+            <div><small>Total Earnings:</small> <strong id="grandTotal">$0.00</strong></div>
+            <div class="muted"><small>Total Expenses:</small> <span id="totalExpenses">$0.00</span></div>
+            <div><small>Net:</small> <strong id="netTotal">$0.00</strong></div>
+          </div>
+        </div>
+
+<div class="ticketActions"><div class="row1"><button id="addServiceBtn" class="btn" class="primary">Add Service</button></div>
+  <div class="row1 mobile-only">
+    <button id="addTarpPill" class="pill pill-blue">+ Add Tarp</button>
+  </div>
+<div class="row2"><button id="customServiceBtn" class="ghost">+ Custom Service</button><button id="addExpenseBtn" class="danger">+ Add Expense</button></div></div>
+<h2>Services</h2>
+
+        <div class="tableWrap">
+          <table id="ticketTable">
+            <thead>
+              <tr>
+                <th class="colService">Service</th>
+                <th>Qty</th>
+                <th>Price</th>
+                <th>Add‑ons</th>
+                <th>Line Total</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+<div id="ticketMobile" class="mobileList"></div>
+        </div>
+
+        <section class="summary card inner">
+          <h3>Daily Summary</h3>
+          <div class="summaryRows">
+            <div><span>Jobs</span><span id="jobsCount">0</span></div>
+            <div><span>Services</span><span id="servicesCount">0</span></div>
+            <div><span>Add‑ons</span><span id="addonsCount">0</span></div>
+            <div><span>Miles Driven</span><span id="milesDriven">0</span> <button id="editMilesBtn" class="ghost small">Edit Miles</button></div>
+            <div class="emphasis"><span>Avg Earning Per Claim</span><span id="avgEarning">$0.00</span></div>
+          </div>
+        </section>
+      </section>
+
+      <section class="history card tabpanel hidden" data-panel="history">
+  <div id="historyTopBar" class="historyTopBar">
+    <div class="left">
+      <label>From <input type="date" id="histStart"></label>
+      <label>to <input type="date" id="histEnd"></label>
+      <button id="histApply" class="btn small">Apply</button>
+    </div>
+    <div class="right">
+      <button id="clearHistoryBtn" class="iconBtn" title="Delete history in a date range" aria-label="Delete by date range">🗑️</button>
+
+    </div>
+  </div>
+  <div id="historySummary" class="historySummary">
+    <div class="sumItem"><span class="k">Total Earnings</span> <span class="v" id="sumTotalEarnings">$0.00</span></div>
+    <div class="sumItem"><span class="k">Total Expenses</span> <span class="v" id="sumTotalExpenses">$0.00</span></div>
+    <div class="sumItem"><span class="k">Net Earnings</span> <span class="v" id="sumNet">$0.00</span></div>
+    <div class="sumItem"><span class="k">Avg Jobs/Day</span> <span class="v" id="sumAvgJobs">0</span></div>
+    <div class="sumItem"><span class="k">Best Day</span> <span class="v" id="sumBest">—</span></div>
+    <div class="sumItem"><span class="k">Worst Day</span> <span class="v" id="sumWorst">—</span></div>
+  </div>
+
+  <h2>History</h2>
+        <div class="rangeHeader">
+          <div class="rangeText" id="rangeText">Selected Range:</div>
+          <div class="chips">
+            <button class="chipBtn" id="chipThisWeek">This Week</button>
+            <button class="chipBtn" id="chipLastWeek">Last Week</button>
+            <button class="chipBtn" id="chipYTD">YTD</button>
+            <button class="chipBtn" id="addNewBtn">Add New</button>
+          </div>
+        </div>
+        <div class="row">
+          <input id="historySearch" class="full" placeholder="Search history…"/>
+        </div>
+        <div id="historyGrouped"></div>
+        </section>
+
+      <section class="carriers card tabpanel hidden" data-panel="carriers">
+        <h2>Billable Carrier Services</h2>
+        <div class="row grid grid-2">
+          <label>Search Carrier
+            <input id="carrierSearch" placeholder="Type carrier name…"/>
+          </label>
+        </div>
+        <div id="carrierList" class="carrierList"></div>
+      </section>
+    </section>
+
+      <section class="backup card tabpanel hidden" data-panel="backup">
+  <div class="backup-panel">
+    <h2 class="h2 m0">Backup &amp; Restore</h2>
+    <p class="muted small">Export a .js?v=3014on from this device and import it on another. Import <b>merges</b> by date and never deletes local entries.</p>
+
+    <div class="backup-actions">
+      <button id="bkExport" class="btn btn-primary">Export JSON</button>
+
+      <label class="btn btn-neutral filelike">
+        <input id="bkImport" type="file" accept="application/json" hidden>
+        <span>Import JSON</span>
+      </label>
+
+      <button id="bkUndo" class="btn btn-ghost">Undo last import</button>
+    </div>
+
+    <div id="bkPreview" class="muted small"></div>
+
+    <div class="backup-info card">
+      <h3 class="h3 m0">Directions</h3>
+      <ol class="list">
+        <li>On your original device, open <b>Backup</b> → tap <b>Export JSON</b> → it downloads a file like <code>seeker-backup-YYYY-MM-DD.js?v=3014on</code>.</li>
+        <li>On the new device, open <b>Backup</b> → tap <b>Import JSON</b> and pick that file.</li>
+        <li>We validate the file and show a preview. Import will <b>merge</b> by date: new days are added; existing days update only if the backup is newer. No local entries are deleted.</li>
+        <li>If something looks wrong, tap <b>Undo last import</b> within a few minutes to restore your previous data snapshot.</li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+  </main>
+
+  <div id="addonsModal" class="modal hidden" aria-hidden="true">
+    <div class="modalCard">
+      <div class="modalHead">
+        <div id="addonsTitle">Add-ons</div>
+        <button id="addonsClose" aria-label="Close">×</button>
+      </div>
+      <div class="modalBody" id="addonsBody"></div>
+      <div class="modalFoot">
+        <button class="ghost" id="addonsCancel">Cancel</button>
+        <button class="primary" id="addonsSave">Save Add-ons</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="tarpModal" class="modal hidden" aria-hidden="true">
+    <div class="modalCard">
+      <div class="modalHead">
+        <h3>Add Tarp</h3>
+        <button id="tarpClose" aria-label="Close">×</button>
+      </div>
+      <div class="modalBody">
+        <div class="row grid grid-2">
+          <div class="stack"><label>Carrier Search<input id="tarpSearch" placeholder="Type carrier…"/></label></div>
+          <label>Carrier
+            <div class="row tight"><select id="tarpCarrier"></select><button id="tarpFavBtn" class="iconBtn" title="Favorite carrier">★</button></div>
+          </label>
+          <label>Sq Ft (or enter L×W)
+            <input id="tarpSqft" type="number" min="0" step="1" placeholder="0"/>
+          </label>
+        </div>
+        <div class="row grid grid-2">
+          <label>Length (ft)
+            <input id="tarpLen" type="number" min="0" step="0.1" placeholder="0"/>
+          </label>
+          <label>Width (ft)
+            <input id="tarpWid" type="number" min="0" step="0.1" placeholder="0"/>
+          </label>
+        </div>
+        <div class="calcResult" id="tarpResult">Enter values to calculate…</div>
+      </div>
+      <div class="modalFoot">
+        <button id="tarpCalcBtn">Preview</button>
+        <button class="primary" id="tarpAddBtn">Add Tarp</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="quickAddModal" class="modal hidden" aria-hidden="true">
+    <div class="modalCard">
+      <div class="modalHead">
+        <h3>Add Entry to History</h3>
+        <button id="quickClose" aria-label="Close">×</button>
+      </div>
+      <div class="modalBody">
+        <div class="row grid grid-2">
+          <label>Date
+            <input id="quickDate" type="date"/>
+          </label>
+          <label>Service
+            <select id="quickService"></select>
+          </label>
+        </div>
+        <div class="row">
+          <input id="quickSearch" class="full" placeholder="Filter services…"/>
+        </div>
+        <div class="modalSubhead" style="margin:8px 0 4px; font-weight:700;">Add‑ons (optional)</div>
+        <div id="quickAddons" class="modalAddonsWrap"></div>
+      </div>
+      <div class="modalFoot">
+        <button class="ghost" id="quickCancel">Cancel</button>
+        <button class="primary" id="quickAddBtn">Add to History</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="expenseModal" class="modal hidden" aria-hidden="true">
+    <div class="modalCard">
+      <div class="modalHead">
+        <h3>Add Expense</h3>
+        <button id="expenseClose" aria-label="Close">×</button>
+      </div>
+      <div class="modalBody">
+        <div class="row grid grid-2">
+          <label>Expense Name
+            <input id="expenseName" placeholder="e.g., Fuel, Parking, Supplies"/>
+          </label>
+          <label>Amount ($)
+            <input id="expenseAmount" type="number" min="0" step="0.01" placeholder="0.00"/>
+          </label>
+        </div>
+      </div>
+      <div class="modalFoot">
+        <button class="ghost" id="expenseCancel">Cancel</button>
+        <button class="primary" id="expenseSave">Save Expense</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="engModal" class="modal hidden" aria-hidden="true">
+    <div class="modalCard">
+      <div class="modalHead">
+        <h3>Engineer Assist — Time</h3>
+        <button id="engClose" aria-label="Close">×</button>
+      </div>
+      <div class="modalBody">
+        <div class="row grid grid-2">
+          <label>Hours
+            <input id="engHours" type="number" min="0" step="1" value="1"/>
+          </label>
+          <label>Minutes
+            <input id="engMinutes" type="number" min="0" max="59" step="1" value="0"/>
+          </label>
+        </div>
+        <div id="engPreview" class="calcResult" style="margin-top:8px;">First hour $100, then $25 per 15 minutes (rounded up).</div>
+      </div>
+      <div class="modalFoot">
+        <button class="ghost" id="engCancel">Cancel</button>
+        <button class="primary" id="engSave">Save Time</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="customModal" class="modal hidden" aria-hidden="true">
+    <div class="modalCard">
+      <div class="modalHead">
+        <h3>Add Custom Service</h3>
+        <button id="customClose" aria-label="Close">×</button>
+      </div>
+      <div class="modalBody">
+        <div class="row grid grid-2">
+          <label>Name
+            <input id="customName" placeholder="e.g., Special Inspection"/>
+          </label>
+          <label>Price
+            <input id="customPrice" type="number" min="0" step="0.01" placeholder="0.00"/>
+          </label>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;margin-top:10px;">
+          <input id="customSave" type="checkbox" checked /> Save to my services for quicker adding
+        </label>
+      </div>
+      <div class="modalFoot">
+        <button class="ghost" id="customCancel">Cancel</button>
+        <button class="primary" id="customSaveBtn">Add Service</button>
+      </div>
+    </div>
+  </div>
+<div style="position:fixed;bottom:6px;left:10px;font-size:12px;color:#888;z-index:9999;">
+    Tip: add <code>?debug=1</code> to the URL for verbose logs.
+  </div>
+  <script>
+    (function(){
+      var lbl = document.getElementById('buildLabel');
+      if(lbl) {
+        lbl.title = 'Click for changelog — Shift+Click to toggle ?debug=1';
+        lbl.addEventListener('click', function(ev){
+          if(ev.shiftKey) {
+            var u = new URL(location.href);
+            if(u.searchParams.get('debug')==='1') u.searchParams.delete('debug'); else u.searchParams.set('debug','1');
+            location.href = u.toString();
+            return;
+          }
+        });
+      }
+    })();
+  </script>
+
+<div id="servicePickerModal" class="modal hidden">
+  <div class="modalCard">
+    <div class="modalHead">
+      <div class="title">Add a Service</div>
+      <button id="pickerClose" class="iconBtn" aria-label="Close">✕</button>
+    </div>
+    <div class="modalBody">
+      <div class="stack">
+        <label>Search services
+          <input id="pickerSearch" placeholder="Type to filter…"/>
+        </label>
+      </div>
+      <div id="pickerList" class="pickerList"></div>
+    </div>
+    <div class="modalFoot">
+      <button id="pickerCancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div id="serviceModal" class="modal hidden">
+  <div class="modalCard">
+    <div class="modalHead">
+      <div class="title">Add Service</div>
+      <button id="svcClose" class="iconBtn">✕</button>
+    </div>
+    <div class="modalBody">
+      <div class="stack">
+        <input id="svcSearch" placeholder="Search services…" />
+      </div>
+      <div id="svcList" class="svcList"></div>
+      <div class="modalFoot">
+        <button id="svcCustom" class="secondary">+ Custom Service</button>
+        <button id="svcDone" class="primary">Done</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<button id="addServiceFab" title="Add Service">＋ Add Service</button>
+
+  <div id="milesModal" class="modal hidden" aria-hidden="true">
+    <div class="modalCard">
+      <div class="modalHead">
+        <h3>Edit Miles</h3>
+        <button id="milesClose" aria-label="Close">×</button>
+      </div>
+      <div class="modalBody">
+        <div class="row grid grid-2">
+          <label>Start Odometer
+            <input id="mileStart" type="number" min="0" step="1" placeholder="e.g., 120345" />
+          </label>
+          <label>End Odometer
+            <input id="mileEnd" type="number" min="0" step="1" placeholder="e.g., 120612" />
+          </label>
+        </div>
+      </div>
+      <div class="modalFoot">
+        <button class="ghost" id="milesCancel">Cancel</button>
+        <button class="primary" id="milesSave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+(function(){
+  try { if (typeof window.checkDayAndMaybeReload !== 'function') { window.checkDayAndMaybeReload = function(){}; } } catch(_) {
+    try{ this.checkDayAndMaybeReload = function(){}; }catch(__){}
+  }
+  var lockKey = 'et_rollover_lock';
+  function iso(d){ d=d||new Date(); var y=d.getFullYear(), m=('0'+(d.getMonth()+1)).slice(-2), da=('0'+d.getDate()).slice(-2); return y+'-'+m+'-'+da; }
+  function getSavedDate(){ try{ var t = JSON.parse(localStorage.getItem('et_ticket_v14')); return t && t.date || null; }catch(_){ return null; } }
+  function soft(){
+    try{ var today = iso(new Date()); var t = JSON.parse(localStorage.getItem('et_ticket_v14')||'{}')||{}; t.date=today; localStorage.setItem('et_ticket_v14', JSON.stringify(t)); localStorage.setItem('et_lastResetDate', JSON.stringify(today)); }catch(_){}
+  }
+  function check(){
+    try{ var today = iso(new Date()); var saved = getSavedDate(); if(!saved || saved===today) return;
+      try{ if(sessionStorage.getItem(lockKey)===today) return; sessionStorage.setItem(lockKey, today); }catch(_){}
+      soft();
+    }catch(_){}
+  }
+  document.addEventListener('visibilitychange', function(){ if (document.visibilityState==='visible') check(); });
+  window.addEventListener('pageshow', function(e){ if(!e.persisted) check(); });
+  try{ check(); }catch(_){}
+})();
+</script>
+<script>
+// Robust local-date normalization for iOS: ensure today's ticket shows
+(function(){
+  try{
+    var lockKey = 'et_localdate_fix_lock';
+    function isoLocal(d){
+      d = d || new Date();
+      var y = d.getFullYear(), m = ('0'+(d.getMonth()+1)).slice(-2), da=('0'+d.getDate()).slice(-2);
+      return y+'-'+m+'-'+da;
+    }
+    function readTicket(){
+      try{ return JSON.parse(localStorage.getItem('et_ticket_v14')||'null'); }catch(_){ return null; }
+    }
+    function writeTicket(t){
+      try{ localStorage.setItem('et_ticket_v14', JSON.stringify(t)); }catch(_){}
+    }
+    function backupPrev(today, t){
+      try{ localStorage.setItem('et_prevTicketBackup', JSON.stringify({date: today, ticket: t||null})); }catch(_){}
+    }
+    function needsFix(saved){
+      var today = isoLocal(new Date());
+      if (!saved) return false;
+      if (saved === today) return false;
+      // Allow a 1-day drift (common on iOS timezone edges) -> if saved < today, fix
+      try{
+        var a = new Date(saved+'T00:00:00');
+        var b = new Date(today+'T00:00:00');
+        return a < b;
+      }catch(_){ return saved !== today; }
+    }
+    function applyFix(){
+      var today = isoLocal(new Date());
+      var ticket = readTicket();
+      if (!ticket) return;
+      if (sessionStorage.getItem(lockKey) === today) return;
+      if (needsFix(ticket.date)){
+        backupPrev(today, ticket);
+        ticket.date = today;
+        writeTicket(ticket);
+        try{ localStorage.setItem('et_lastResetDate', JSON.stringify(today)); }catch(_){}
+        sessionStorage.setItem(lockKey, today);
+      }
+    }
+    // Run asap, on pageshow, and on regain visibility
+    applyFix();
+    document.addEventListener('visibilitychange', function(){ if (document.visibilityState==='visible') applyFix(); });
+    window.addEventListener('pageshow', function(e){ if(!e.persisted) applyFix(); });
+  }catch(_){}
+})();
+</script>
+<script id="forceTodayV3014">
+(function(){
+  var TICKET_KEY = 'et_ticket_v14';
+  function todayLocalISO(){
+    var d = new Date();
+    var y = d.getFullYear();
+    var m = ('0'+(d.getMonth()+1)).slice(-2);
+    var da = ('0'+d.getDate()).slice(-2);
+    return y+'-'+m+'-'+da;
+  }
+  function normalizeTicketDate(){
+    try{
+      var raw = localStorage.getItem(TICKET_KEY);
+      if(!raw) return;
+      var t = JSON.parse(raw);
+      var today = todayLocalISO();
+      if (!t || typeof t !== 'object') return;
+      if (t.date !== today){
+        try{ localStorage.setItem('et_prevTicketBackup', JSON.stringify({date: today, ticket: t})); }catch(_){}
+        t.date = today;
+        localStorage.setItem(TICKET_KEY, JSON.stringify(t));
+        localStorage.setItem('et_lastResetDate', JSON.stringify(today));
+      }
+    }catch(_){}
+  }
+  try{ if (typeof window.checkDayAndMaybeReload !== 'function') window.checkDayAndMaybeReload = function(){}; }catch(_){}
+  normalizeTicketDate();
+  document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'visible') normalizeTicketDate(); });
+  window.addEventListener('pageshow', function(e){ if (!e.persisted) normalizeTicketDate(); });
+  setInterval(function(){ if (!document.hidden) normalizeTicketDate(); }, 60000);
+})();
+</script>
+<script src="idb-persist.js?v=3014"></script>
+<script src="main.v43.v3.0.js?v=3014"></script>
+
+  <div id="confirmModal" class="modal hidden" aria-hidden="true">
+    <div class="modalCard">
+      <div class="modalHead">
+        <h3>Confirm Deletion</h3>
+        <button id="confirmClose" aria-label="Close">×</button>
+      </div>
+      <div class="modalBody">
+        <p id="confirmMessage">Are you sure you want to delete this item?</p>
+      </div>
+      <div class="modalFoot">
+        <button class="ghost" id="confirmCancel">Cancel</button>
+        <button class="danger" id="confirmOk">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="deleteRangeModal" class="modal hidden" aria-hidden="true">
+    <div class="modalCard">
+      <div class="modalHead">
+        <h3>Delete History (Range)</h3>
+        <button id="delRangeClose" aria-label="Close">×</button>
+      </div>
+      <div class="modalBody">
+        <div class="row grid grid-2">
+          <label>From
+            <input type="date" id="delStart">
+          </label>
+          <label>To
+            <input type="date" id="delEnd">
+          </label>
+        </div>
+        <p class="muted" style="margin-top:8px">This will permanently delete entries within the selected dates.</p>
+      </div>
+      <div class="modalFoot">
+        <button class="ghost" id="delRangeCancel">Cancel</button>
+        <button class="danger" id="delRangeConfirm">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register('/sw.js?v=3014').catch(console.error);
+      });
+    }
+  </script>
+
+  <div id="installBanner" class="installBanner hidden" role="region" aria-label="Install app">
+    <div class="installInner">
+      <span class="installText">Install Seeker Companion?</span>
+      <button id="installBtn" class="installBtn">Install</button>
+      <button id="installClose" class="installClose" aria-label="Close">✕</button>
+    </div>
+    <div id="iosHint" class="iosHint hidden">On iPhone: tap <span class="iosShare">Share</span> → <b>Add to Home Screen</b></div>
+  </div>
+
+  <script>
+  (function(){
+    var banner = document.getElementById('installBanner');
+    var btn = document.getElementById('installBtn');
+    var closeBtn = document.getElementById('installClose');
+    var iosHint = document.getElementById('iosHint');
+
+    var isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+
+    function showBanner(){
+      if(!banner) return;
+      banner.classList.remove('hidden');
+    }
+    function hideBanner(){
+      if(!banner) return;
+      banner.classList.add('hidden');
+    }
+
+    // iOS Safari doesn't fire beforeinstallprompt
+    var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+
+    var deferredPrompt = null;
+    window.addEventListener('beforeinstallprompt', function(e){
+      if(isStandalone) return;
+      e.preventDefault();
+      deferredPrompt = e;
+      if(iosHint) iosHint.classList.add('hidden');
+      showBanner();
+    });
+
+    // If opened in a normal browser and not installed, hint install
+    window.addEventListener('load', function(){
+      if(isStandalone) return;
+      // If we never get beforeinstallprompt (iOS), show the iOS hint
+      setTimeout(function(){
+        if(!deferredPrompt){
+          if(isIOS && iosHint) iosHint.classList.remove('hidden');
+          showBanner();
+        }
+      }, 800);
+    });
+
+    if(btn){
+      btn.addEventListener('click', async function(){
+        if(deferredPrompt){
+          deferredPrompt.prompt();
+          try {
+            await deferredPrompt.userChoice;
+          } catch(e){}
+          deferredPrompt = null;
+          hideBanner();
+        }else if(isIOS){
+          // iOS: leave the banner + hint visible
+        }else{
+          hideBanner();
+        }
+      });
+    }
+    if(closeBtn){
+      closeBtn.addEventListener('click', hideBanner);
+    }
+  })();
+  </script>
+
+  <script>
+  // Diagnostic killer for stubborn debug tip
+  (function(){
+    var TARGET_TXT = "tip: add ?debug=1 to the url for verbose logs.";
+    function containsTip(node){
+      try{
+        var txt = (node.innerText || node.textContent || "").toLowerCase();
+        return txt.includes(TARGET_TXT);
+      }catch(e){ return false; }
+    }
+    function kill(node, reason){
+      try{
+        var target = node;
+        // Walk up a few ancestors to remove the small fixed footer container
+        for (var i=0;i<4;i++){
+          if (!target) break;
+          var cs = getComputedStyle(target);
+          if (cs && cs.position === 'fixed') break;
+          target = target.parentElement;
+        }
+        (target || node).remove();
+        try{
+          var err = new Error("Removed debug tip: " + reason);
+          localStorage.setItem('debugTipRemovedAt', new Date().toISOString());
+          localStorage.setItem('debugTipRemovalStack', err.stack || '');
+        }catch(_){}
+        console.warn("[Seeker] Removed stray debug tip:", reason);
+      }catch(e){}
+    }
+    function scanAll(){
+      var nodes = Array.from(document.body.querySelectorAll('*'));
+      for (var i=0;i<nodes.length;i++){
+        var el = nodes[i];
+        if (containsTip(el)) kill(el, 'scanAll');
+      }
+    }
+    if (document.readyState === 'loading'){
+      document.addEventListener('DOMContentLoaded', scanAll);
+    } else {
+      scanAll();
+    }
+    // Observe future additions
+    try{
+      var mo = new MutationObserver(function(muts){
+        for (var m of muts){
+          if (m.addedNodes){
+            m.addedNodes.forEach(function(n){
+              if (n.nodeType === 1){
+                if (containsTip(n)) kill(n, 'mutation');
+                // also scan children of this node shallowly
+                var kids = n.querySelectorAll ? n.querySelectorAll('*') : [];
+                kids.forEach(function(k){
+                  if (containsTip(k)) kill(k, 'mutation-children');
+                });
+              }
+            });
+          }
+        }
+      });
+      mo.observe(document.body, { childList: true, subtree: true });
+    }catch(e){}
+    // Re-try a couple times in case a late script injects it
+    setTimeout(scanAll, 600);
+    setTimeout(scanAll, 1500);
+  })();
+  </script>
+
+  <script>
+  (function(){
+    function removeDebugTip(){
+      try{
+        var body = document.body; if(!body || !body.querySelectorAll) return;
+        var nodes = body.querySelectorAll('*');
+        for (var i=0;i<nodes.length;i++){
+          var el = nodes[i];
+          var t = (el.innerText || el.textContent || '').toLowerCase();
+          if (!t) continue;
+          if (t.includes('tip: add ?debug=1 to the url for verbose logs')){
+            var target = el;
+            for (var j=0;j<4;j++){
+              if (!target) break;
+              var cs = getComputedStyle(target);
+              if (cs && cs.position === 'fixed') break;
+              target = target.parentElement;
+            }
+            (target || el).remove();
+            break;
+          }
+        }
+      }catch(e){}
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', removeDebugTip, {once:true});
+    else removeDebugTip();
+    setTimeout(removeDebugTip, 600);
+  })();
+  </script>
+
+  <script src="https://identity.netlify.com/v1/netlify-identity-widget.js?v=3014"></script>
+
+  <div id="buildBadge" style="position:fixed;right:8px;bottom:8px;z-index:9999;opacity:.8;font-size:12px;color:var(--et-muted);pointer-events:none;">V3.0.34-hooks6-ios1</div>
+
+<script>
+(function(){
+  function matchPillSize(root){
+    try{
+      var b = root.querySelector('.mqty .qtyWrap button');
+      var h = b ? b.getBoundingClientRect().height : 34;
+      root.querySelectorAll('.mactions .btnIcon, .mactions .btn, .mactions button').forEach(function(el){
+        el.style.minHeight = h + 'px';
+        el.style.minWidth  = h + 'px';
+        el.style.lineHeight = h + 'px';
+      });
+    }catch(e){}
+  }
+  function moveAllActionsOnce(){
+    // For each actions row anywhere in the page
+    document.querySelectorAll('.mrow.actions').forEach(function(actions){
+      if (!actions || actions.__inlined) return;
+      // find the closest previous sibling that is a .mrow.mid
+      var prev = actions.previousElementSibling;
+      while (prev && !prev.classList.contains('mid')) prev = prev.previousElementSibling;
+      if (!prev) return;
+      var wrap = prev.querySelector('.mactions');
+      if (!wrap){
+        wrap = document.createElement('div');
+        wrap.className = 'mactions';
+        prev.appendChild(wrap);
+      }
+      while (actions.firstChild) wrap.appendChild(actions.firstChild);
+      actions.style.display = 'none';
+      actions.__inlined = true;
+      matchPillSize(prev.parentElement || document);
+    });
+  }
+  function run(){ moveAllActionsOnce(); }
+  function retry(){ run(); setTimeout(run,100); setTimeout(run,300); setTimeout(run,800); }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', retry, {once:true}); else retry();
+  var obs = new MutationObserver(retry);
+  obs.observe(document.body, {subtree:true, childList:true});
+  window.addEventListener('pageshow', retry);
+  window.addEventListener('focus', retry);
+  window.addEventListener('resize', retry);
+})();
+</script>
+
+<script>
+(function(){
+  var GOLD = '#d4af37';
+  function svgPlus(size, strokeWidth){
+    var s = size || 18, sw = strokeWidth || 3.5;
+    return '<svg aria-hidden="true" width="'+s+'" height="'+s+'" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="display:block;">'
+         + '<path d="M12 5v14M5 12h14" stroke="'+GOLD+'" stroke-width="'+sw+'" stroke-linecap="round" stroke-linejoin="round"/>'
+         + '</svg>';
+  }
+  function replacePlus(){
+    document.querySelectorAll('.mcard .mrow.mid .mactions [data-act="addons"]').forEach(function(btn){
+      // Only replace if it still contains text/emoji, not an SVG already
+      if (!btn.__svgified) {
+        // Keep accessible label via title/aria-label; swap glyph
+        btn.innerHTML = svgPlus(18, 4.2); // thicker to match emoji
+        btn.__svgified = true;
+      }
+      // ensure color sticks even if theme tries to override
+      btn.style.setProperty('color', GOLD, 'important');
+      btn.style.setProperty('-webkit-text-fill-color', GOLD, 'important');
+    });
+  }
+  function fitToPill(){
+    // Match SVG size to pill height a bit better
+    var anyBtn = document.querySelector('.mqty .qtyWrap button');
+    if (!anyBtn) return;
+    var h = Math.max(16, Math.min(22, Math.round(anyBtn.getBoundingClientRect().height * 0.55))); // 55% of pill height
+    document.querySelectorAll('.mcard .mrow.mid .mactions [data-act="addons"] svg').forEach(function(svg){
+      svg.setAttribute('width', h);
+      svg.setAttribute('height', h);
+    });
+  }
+  function run(){ replacePlus(); fitToPill(); }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run, {once:true}); else run();
+  var obs = new MutationObserver(run);
+  obs.observe(document.body, {subtree:true, childList:true});
+  window.addEventListener('pageshow', run);
+  window.addEventListener('focus', run);
+  window.addEventListener('resize', run);
+})();
+</script>
+
+<script>
+document.addEventListener('DOMContentLoaded', function(){
+  try{
+    var m=document.getElementById('changelogModal'); if(m&&m.parentNode){ m.parentNode.removeChild(m); }
+    var b=document.getElementById('changelogBackdrop'); if(b&&b.parentNode){ b.parentNode.removeChild(b); }
+  }catch(e){}
+});
+</script>
+
+<style>#appVersionBadge{display:block!important;}</style>
+
+<script id="versionCleanerV3025">
+(function(){
+  function isVersionText(t){
+    return /^V\d+\.\d+(?:\.\d+)?$/i.test((t||'').trim());
+  }
+  function isInsideOurBadge(node){
+    try{ return node && (node.id==='appVersionBadge' || (node.closest && node.closest('#appVersionBadge'))); }catch(_){ return false; }
+  }
+  function cleanNode(node){
+    try{
+      if(!node || isInsideOurBadge(node)) return;
+      if(node.nodeType===3){ // text node
+        if(isVersionText(node.nodeValue) && !isInsideOurBadge(node.parentNode)){
+          node.parentNode && node.parentNode.removeChild(node);
+          return;
+        }
+      }else if(node.nodeType===1){
+        var txt=(node.textContent||'').trim();
+        if(isVersionText(txt) && node.id!=='appVersionBadge'){
+          node.remove && node.remove();
+          return;
+        }
+      }
+      var kids = node.childNodes;
+      for(var i=kids.length-1;i>=0;i--){ cleanNode(kids[i]); }
+    }catch(_){}
+  }
+  function sweep(){ cleanNode(document.body||document.documentElement); }
+  if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded', sweep); } else { sweep(); }
+  try{ new MutationObserver(sweep).observe(document.documentElement,{childList:true,subtree:true}); }catch(_){}
+})();
+</script>
+
+<script id="pwaHelperV3025">
+(function(){
+  try{
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistration('/').then(function(reg){
+        if(!reg){
+          navigator.serviceWorker.register('/sw.js', {scope: '/'}).catch(function(){});
+        }
+      }).catch(function(){});
+      // also try current path scope as fallback
+      navigator.serviceWorker.getRegistration().then(function(reg){
+        if(!reg){
+          navigator.serviceWorker.register('sw.js', {scope: './'}).catch(function(){});
+        }
+      }).catch(function(){});
+    }
+  }catch(_){}
+  try{
+    // capture beforeinstallprompt
+    window.deferredPrompt = null;
+    window.addEventListener('beforeinstallprompt', function(e){
+      try{ e.preventDefault(); }catch(_){}
+      window.deferredPrompt = e;
+      try{ window.dispatchEvent(new CustomEvent('pwa-install-available')); }catch(_){}
+    });
+    // hook generic "Install" buttons
+    function hook(){
+      try{
+        var els = Array.from(document.querySelectorAll('[data-install], .install, button, a')).filter(function(n){
+          var t=(n.textContent||'').trim().toLowerCase();
+          return t==='install' || t==='add to home screen' || t==='install app' || t==='install seeker companion?';
+        });
+        els.forEach(function(btn){
+          if(btn.__pwaHooked) return;
+          btn.__pwaHooked = true;
+          btn.addEventListener('click', function(){
+            if(window.deferredPrompt){
+              window.deferredPrompt.prompt();
+              window.deferredPrompt.userChoice.finally(function(){ window.deferredPrompt=null; });
+            }
+          });
+        });
+      }catch(_){}
+    }
+    document.addEventListener('DOMContentLoaded', hook);
+    try{ new MutationObserver(hook).observe(document.documentElement,{childList:true,subtree:true}); }catch(_){}
+  }catch(_){}
+})();
+</script>
+
+<script>
+(function(){
+  function msUntilNextLocalMidnight(){
+    var now = new Date();
+    var next = new Date(now);
+    next.setHours(24,0,0,0);
+    return next.getTime() - now.getTime();
+  }
+  function callEnsure(){
+    try {
+      if (typeof ensureDayConsistency === 'function') {
+        ensureDayConsistency();
+      } else {
+        // conservative fallback
+        location.reload();
+      }
+    } catch(_) {}
+  }
+  var t = setTimeout(function tick(){
+    callEnsure();
+    t = setTimeout(tick, msUntilNextLocalMidnight());
+  }, msUntilNextLocalMidnight());
+})();
+</script>
+
+  <script src="/date.util.v1.js"></script>
+
+<script>
+(function(){
+  // --- Local today helper (strict local) ---
+  function pad(n){ return String(n).padStart(2,'0'); }
+  function todayISO(){ const d=new Date(); return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate()); }
+  function normYMD(d){
+    if (typeof d === 'string'){
+      let m = d.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (m) return m[1]+"-"+m[2]+"-"+m[3];
+      m = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if (m) return m[3]+"-"+pad(+m[1])+"-"+pad(+m[2]);
+    }
+    const dt = (d instanceof Date) ? d : new Date();
+    return dt.getFullYear()+"-"+pad(dt.getMonth()+1)+"-"+pad(dt.getDate());
+  }
+  function lsGetRaw(k){ try{ const v=localStorage.getItem(k); return v?JSON.parse(v):null; }catch{ return null; } }
+  function pickItems(e){
+    if (!e||typeof e!=='object') return [];
+    if (Array.isArray(e.items)) return e.items;
+    if (Array.isArray(e.services)) return e.services;
+    if (Array.isArray(e.claims)) return e.claims;
+    if (e.ticket && Array.isArray(e.ticket.items)) return e.ticket.items;
+    return [];
+  }
+  function entryMatchesDate(e, ymd){
+    if (!e||typeof e!=='object') return false;
+    const c = [e.date, e.day, e.serviceDate, e?.ticket?.date].filter(Boolean);
+    return c.some(d => normYMD(d)===ymd);
+  }
+  function loadTicketFor(ymd){
+    // 1) et_ticket_v14::<date> (per-day)
+    const per = lsGetRaw('et_ticket_v14::'+ymd);
+    if (per && (Array.isArray(per.items) || per.ticket)){
+      const items = per.items || (per.ticket? per.ticket.items: []);
+      return { date: ymd, items: Array.isArray(items)? items: [], addons:[], expenses:[], totals:{subtotal:0,tax:0,total:0} };
+    }
+    // 2) et_history_v14[]
+    const arr = lsGetRaw('et_history_v14');
+    if (Array.isArray(arr)){
+      const hit = arr.find(e=>entryMatchesDate(e, ymd));
+      if (hit){ return { date: ymd, items: pickItems(hit), addons:[], expenses:[], totals:{subtotal:0,tax:0,total:0} }; }
+    }
+    // 3) scan keys
+    try{
+      for (let i=0;i<localStorage.length;i++){
+        const k = localStorage.key(i);
+        if (!k) continue;
+        if (k==='et_ticket_v14' || k==='et_history_v14') continue;
+        const v = lsGetRaw(k);
+        if (Array.isArray(v)){
+          const hit = v.find(e=>entryMatchesDate(e, ymd));
+          if (hit){ return { date: ymd, items: pickItems(hit), addons:[], expenses:[], totals:{subtotal:0,tax:0,total:0} }; }
+        }else if (v && typeof v==='object'){
+          const m = k.match(/(\d{4}-\d{2}-\d{2})/);
+          if (m && normYMD(m[1])===ymd){
+            const it = pickItems(v); return { date: ymd, items: it, addons:[], expenses:[], totals:{subtotal:0,tax:0,total:0} };
+          }
+          for (const prop in v){
+            if (/^\d{4}-\d{2}-\d{2}$/.test(prop) && prop===ymd){
+              const val = v[prop]; const it = Array.isArray(val)? val : pickItems(val);
+              return { date: ymd, items: Array.isArray(it)? it: [], addons:[], expenses:[], totals:{subtotal:0,tax:0,total:0} };
+            }
+          }
+        }
+      }
+    }catch{}
+    return { date: ymd, items: [], addons:[], expenses:[], totals:{subtotal:0,tax:0,total:0} };
+  }
+
+  // --- UI Toolbar ---
+  let selectedDate = todayISO();
+  function chevron(dir){
+    const flip = dir==='left' ? 'transform:scaleX(-1);' : '';
+    return '<svg width="26" height="26" viewBox="0 0 24 24" style="'+flip+'"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  }
+  function ensureToolbar(){
+    if (document.getElementById('dateToolbar')) return;
+    const bar = document.createElement('div'); bar.id='dateToolbar';
+    bar.style.cssText="display:flex;justify-content:space-between;align-items:center;gap:8px;margin:8px 8px 6px;pointer-events:none;";
+    function mkBtn(id, dir){
+      const b=document.createElement('button'); b.id=id; b.type='button';
+      b.style.cssText="pointer-events:auto;display:inline-flex;align-items:center;justify-content:center;gap:10px;background:#f3c316;border:none;color:#0b1224;font-weight:900;border-radius:14px;padding:12px 18px;box-shadow:0 8px 24px rgba(0,0,0,.35);font-size:15px;";
+      b.innerHTML=(dir==='left'?chevron('left'):'')+"<span style='font-weight:900;letter-spacing:.3px'>"+(dir==='left'?'Previous':'Next')+"</span>"+(dir==='right'?chevron('right'):'');
+      return b;
+    }
+    const prev=mkBtn('datePrevBtn','left'); const next=mkBtn('dateNextBtn','right');
+    const label=document.createElement('div'); label.id='dateLabel';
+    label.style.cssText="flex:1;text-align:center;color:#e7ecff;font-weight:800;font-size:14px;opacity:.9;pointer-events:none;";
+    bar.appendChild(prev); bar.appendChild(label); bar.appendChild(next);
+    // anchor above Services or Add Service area
+    let anchor = Array.from(document.querySelectorAll('button,a')).find(el=>/Add Service/i.test(el.textContent||''));
+    if (anchor && anchor.parentElement) anchor = anchor.parentElement;
+    if (!anchor){ anchor = Array.from(document.querySelectorAll('body *')).find(el=>/^\\s*Services\\s*$/i.test((el.textContent||'').trim())); }
+    if (!anchor){ anchor = document.body.firstElementChild; }
+    if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(bar, anchor);
+    // events
+    prev.addEventListener('click', ()=> changeDate(-1));
+    next.addEventListener('click', ()=> changeDate(+1));
+  }
+  function ensureBanner(){
+    if (document.getElementById('dateWarnBanner')) return;
+    const bar = document.createElement('div'); bar.id='dateWarnBanner';
+    bar.style.cssText="margin:0 8px 10px;background:#0d47a1;color:#fff;padding:8px 12px;font-weight:700;font-size:13px;display:none;border-radius:10px;border:1px solid rgba(255,255,255,.25);text-align:center;";
+    bar.textContent="Warning: You are editing a different day";
+    const anchor = document.getElementById('dateToolbar') || document.body.firstElementChild;
+    anchor.parentNode.insertBefore(bar, anchor.nextSibling);
+  }
+  function updateLabel(){
+    const el=document.getElementById('dateLabel'); if(!el) return;
+    const [y,m,d]=selectedDate.split('-').map(Number); const dt=new Date(y,m-1,d);
+    const fmt=dt.toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric',year:'numeric'});
+    el.textContent = fmt + (selectedDate===todayISO()? '  •  Today':'');
+    const warn=document.getElementById('dateWarnBanner'); if (warn) warn.style.display = (selectedDate!==todayISO())?'block':'none';
+  }
+  function addDays(iso, delta){
+    const [y,m,d]=iso.split('-').map(Number);
+    const dt=new Date(y,m-1,d); dt.setDate(dt.getDate()+delta);
+    return dt.getFullYear()+"-"+pad(dt.getMonth()+1)+"-"+pad(dt.getDate());
+  }
+
+  function switchTo(ymd){
+    // Load from storage/history and hand off to app
+    const ticket = loadTicketFor(ymd);
+    if (window.appLoadTicketForDate){
+      window.appLoadTicketForDate(ymd, ticket);
+    } else {
+      // Fallback: best-effort re-render
+      if (window.__appState){
+        __appState.date = ymd;
+        __appState.items = Array.isArray(ticket.items)? ticket.items.slice(): [];
+      }
+      if (typeof window.renderTicket==='function') window.renderTicket();
+    }
+    updateLabel();
+    // Notify listeners
+    try{ window.dispatchEvent(new CustomEvent('ticket:dateChanged', { detail:{date: ymd} })); }catch{}
+  }
+
+  function changeDate(delta){
+    selectedDate = addDays(selectedDate, delta);
+    switchTo(selectedDate);
+  }
+
+  function init(){
+    selectedDate = todayISO();
+    ensureToolbar(); ensureBanner();
+    updateLabel();
+  }
+
+  window.addEventListener('load', init);
+})();
+</script>
+
+<script>
+// Restore last selected day on first load
+(function restoreSelectedOnLoad(){
+  let last = null;
+  try{ last = sessionStorage.getItem('ui_selectedDate'); }catch{}
+  const today = todayISO();
+  // Preferred: restore last if present; else use today
+  selectedDate = (last && /^\d{4}-\d{2}-\d{2}$/.test(last)) ? last : today;
+  try{ sessionStorage.setItem('ui_selectedDate', selectedDate);}catch{}
+  // Wait until app hooks exist, then apply
+  let tries = 0;
+  const timer = setInterval(()=>{
+    tries++;
+    const hasHooks = typeof window.appLoadTicketForDate === 'function' && typeof window.renderTicket === 'function';
+    if (hasHooks){
+      // Build a ticket using our adaptive loader if available, else fallback to current local storage
+      try{
+        const loader = (typeof ticketFromHistory_adaptive === 'function') ? ticketFromHistory_adaptive : ticketFromHistory;
+        const tRaw = loader(selectedDate);
+        const ticket = deepCloneTicket ? deepCloneTicket(tRaw) : tRaw;
+        window.__suppressDateReload = (selectedDate !== today);
+        if (typeof window.appLoadTicketForDate === 'function'){
+          window.appLoadTicketForDate(selectedDate, ticket);
+        }
+        updateLabel(); updateBanner();
+      }catch{}
+      clearInterval(timer);
+      return;
+    }
+    if (tries > 25) clearInterval(timer);
+  }, 120);
+})();
+</script>
+<script>
+(function(){
+  function pad(n){ return String(n).padStart(2,'0'); }
+  function ymdLocal(d){
+    d = d instanceof Date ? d : new Date();
+    return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate());
+  }
+  function parseYMD(ymd){
+    if (typeof ymd!=='string') return new Date();
+    var m = ymd.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return new Date(ymd);
+    return new Date(+m[1], +m[2]-1, +m[3]);
+  }
+  function wkStart(d){ // week start = Sunday (US)
+    var x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    var w = x.getDay(); // 0..6 (Sun..Sat)
+    x.setDate(x.getDate() - w);
+    return x;
+  }
+  function wkKey(d){
+    var s = wkStart(d);
+    return s.getFullYear()+"-"+pad(s.getMonth()+1)+"-"+pad(s.getDate());
+  }
+  function getJSON(k){ try{ var v=localStorage.getItem(k); return v?JSON.parse(v):null; }catch(e){ return null; } }
+  function setJSON(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} }
+  function cmpDesc(a,b){
+    var da = parseYMD(a.__dateYMD || a.date || a.day || (a.ticket && a.ticket.date) || "1970-01-01");
+    var db = parseYMD(b.__dateYMD || b.date || b.day || (b.ticket && b.ticket.date) || "1970-01-01");
+    return db - da;
+  }
+  function normalizeHistory(){
+    var hist = getJSON('et_history_v14'); if (!Array.isArray(hist)) hist = [];
+    var map = new Map();
+    for (var i=0;i<hist.length;i++){
+      var h = hist[i]||{};
+      var d = (h.date||h.day||(h.ticket&&h.ticket.date)||"");
+      if (!d) continue;
+      var ymd = d.match(/^\d{4}-\d{2}-\d{2}$/) ? d : (function(){
+        var m = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); 
+        return m ? (m[3]+"-"+pad(+m[1])+"-"+pad(+m[2])) : d;
+      })();
+      // drop truly empty entries
+      var items = Array.isArray(h.items)? h.items : (Array.isArray(h.services)? h.services : (Array.isArray(h.claims)? h.claims : []));
+      if (!items.length) continue;
+      var copy = Object.assign({}, h);
+      copy.__dateYMD = ymd;
+      map.set(ymd, copy); // latest wins
+    }
+    var arr = Array.from(map.values());
+    arr.sort(cmpDesc);
+    // attach week grouping metadata (optional use by UI)
+    var today = new Date();
+    var thisWeekStart = wkStart(today);
+    var lastWeekStart = new Date(thisWeekStart.getFullYear(), thisWeekStart.getMonth(), thisWeekStart.getDate()-7);
+    arr = arr.map(function(h){
+      var d = parseYMD(h.__dateYMD);
+      var wk = wkKey(d), wkThis = wkKey(today), wkLast = wkKey(lastWeekStart);
+      var tag = "";
+      if (h.__dateYMD === ymdLocal(today)) tag = "Today";
+      else if (h.__dateYMD === ymdLocal(new Date(today.getFullYear(), today.getMonth(), today.getDate()-1))) tag = "Yesterday";
+      else if (wk === wkThis) tag = "This Week";
+      else if (wk === wkLast) tag = "Last Week";
+      else tag = "Older";
+      h.__groupTag = tag;
+      return h;
+    });
+    setJSON('et_history_v14', arr);
+  }
+
+  // Run normalize on load, and after any ticket change
+  try{ normalizeHistory(); }catch{}
+  window.addEventListener('ticket:dateChanged', function(){ try{ normalizeHistory(); }catch{} });
+  window.addEventListener('storage', function(e){ if (e && e.key === 'et_history_v14'){ try{ normalizeHistory(); }catch{} } });
+
+  // Stronger refresh correctness:
+  // After hydration, if we have a __forceInitDate, re-apply it once on pageshow/visibility
+  function reapplySelectedOnce(){
+    if (!window.__forceInitDate) return;
+    var ymd = window.__forceInitDate;
+    var tries = 0, t = setInterval(function(){
+      tries++;
+      if (typeof window.appLoadTicketForDate === 'function' && typeof window.renderTicket === 'function'){
+        try{
+          var base = getJSON('et_ticket_v14') || {date: ymd, items: []};
+          if (base.date !== ymd){
+            // Build from per-day ticket or history if base is for a different day
+            var scoped = getJSON('et_ticket_v14::'+ymd);
+            if (!scoped){
+              var hist = getJSON('et_history_v14') || [];
+              for (var i=0;i<hist.length;i++){
+                var h = hist[i]||{}; var d = h.date||h.day||(h.ticket&&h.ticket.date);
+                if (d === ymd){ scoped = { date: ymd, items: (h.items||h.services||h.claims||[]) }; break; }
+              }
+            }
+            base = scoped || base;
+            setJSON('et_ticket_v14', base);
+          }
+          window.__suppressDateReload = (ymd !== ymdLocal(new Date()));
+          window.appLoadTicketForDate(ymd, base);
+        }catch(e){}
+        clearInterval(t);
+      }
+      if (tries > 25) clearInterval(t);
+    }, 120);
+  }
+  window.addEventListener('pageshow', reapplySelectedOnce);
+  document.addEventListener('visibilitychange', function(){ if (!document.hidden) reapplySelectedOnce(); });
+  window.addEventListener('focus', reapplySelectedOnce);
+})();
+</script>
+<script>
+// --- First-render guard to ensure data matches the selected label date after refresh ---
+(function(){
+  function pad(n){ return String(n).padStart(2,'0'); }
+  function ymdLocal(d){ d = d instanceof Date ? d : new Date(); return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate()); }
+  function getJSON(k){ try{ var v=localStorage.getItem(k); return v?JSON.parse(v):null; }catch(e){ return null; } }
+  function cloneItems(items){ return Array.isArray(items)? items.map(function(it){ var x=Object.assign({}, it); x.addons = Array.isArray(it.addons)? it.addons.map(function(a){ return Object.assign({}, a); }):[]; return x; }):[]; }
+
+  function loadTicketFor(ymd){
+    // Prioritize per-day ticket, fallback to history
+    var t = getJSON('et_ticket_v14::'+ymd);
+    if (!t){
+      var hist = getJSON('et_history_v14') || [];
+      if (Array.isArray(hist)){
+        for (var i=0;i<hist.length;i++){
+          var h = hist[i]||{}; var d = h.date||h.day||(h.ticket&&h.ticket.date);
+          if (d === ymd){
+            t = { date: ymd, items: (h.items||h.services||h.claims||[]), totals: h.totals||{subtotal:0,tax:0,total:0}, addons:[], expenses:[], engineer:null, notes:"" };
+            break;
+          }
+        }
+      }
+    }
+    if (!t){ t = { date: ymd, items:[], totals:{subtotal:0,tax:0,total:0}, addons:[], expenses:[], engineer:null, notes:"" }; }
+    return t;
+  }
+
+  function enforceSelectedOnce(){
+    try{
+      var sel = (function(){
+        try{ var s=sessionStorage.getItem('ui_selectedDate'); if (s && /^\d{4}-\d{2}-\d{2}$/.test(s)) return s; }catch(e){}
+        return ymdLocal(new Date());
+      })();
+      if (!window.__appState || typeof window.renderTicket !== 'function') return false;
+      // If the app state's date doesn't match the selected label date, fix the state before first draw
+      if (window.__appState.date !== sel){
+        var tk = loadTicketFor(sel);
+        window.__appState.date  = sel;
+        window.__appState.items = cloneItems(tk.items);
+        try{ localStorage.setItem('et_ticket_v14', JSON.stringify({date: sel, items: tk.items})); }catch(e){}
+      }
+      return true;
+    }catch(e){ return false; }
+  }
+
+  function installGuard(){
+    if (window.__renderGuardInstalled) return;
+    function wrap(){
+      if (typeof window.renderTicket !== 'function') return false;
+      var orig = window.renderTicket;
+      window.renderTicket = function(){
+        try{ enforceSelectedOnce(); }catch(e){}
+        return orig.apply(this, arguments);
+      };
+      window.__renderGuardInstalled = { unwrap: function(){ window.renderTicket = orig; } };
+      return true;
+    }
+    var tries = 0, t = setInterval(function(){
+      tries++;
+      if (wrap()){ clearInterval(t); }
+      if (tries > 50) clearInterval(t);
+    }, 80);
+  }
+
+  function unwrapGuardOnce(){
+    if (window.__renderGuardInstalled && window.__renderGuardInstalled.unwrap){
+      try{ window.__renderGuardInstalled.unwrap(); }catch(e){}
+      window.__renderGuardInstalled = null;
+    }
+  }
+
+  // Install guard early; enforce on first load/pageshow, then unwrap
+  installGuard();
+  window.addEventListener('load', function(){
+    setTimeout(function(){ try{ enforceSelectedOnce(); }catch(e){}; unwrapGuardOnce(); }, 60);
+  });
+  window.addEventListener('pageshow', function(){
+    setTimeout(function(){ try{ enforceSelectedOnce(); }catch(e){}; unwrapGuardOnce(); }, 60);
+  });
+})();
+</script>
+<script>
+// Resilient storage shim (helper-only) for iOS private/A2HS scenarios
+(function(){
+  var _mem = {};
+  window.__safeStore__ = {
+    get: function(k){
+      try{
+        var v = localStorage.getItem(k);
+        return v ? JSON.parse(v) : null;
+      }catch(e){
+        return _mem[k] || null;
+      }
+    },
+    set: function(k, val){
+      var s = null;
+      try{ s = JSON.stringify(val); }catch(e){ s = null; }
+      if (s === null) return;
+      try{ localStorage.setItem(k, s); }catch(e){
+        _mem[k] = val; // in-memory fallback
+      }
+    }
+  };
+})();
+</script>
+<script>
+// iOS-only date-apply enforcement wrapper (Android untouched)
+(function(){
+  var ua = navigator.userAgent||"";
+  var isiOS = /iPhone|iPad|iPod/i.test(ua) || /Macintosh;.*Mobile/.test(ua);
+  if (!isiOS) return;
+
+  function getJSON(k){ try{ var v=localStorage.getItem(k); return v?JSON.parse(v):null; }catch(e){ return null; } }
+  function setJSON(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} }
+  function pad(n){ return String(n).padStart(2,'0'); }
+  function todayISO(){ var d=new Date(); return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate()); }
+  function deepCloneTicket(t){
+    if(!t) return {date: todayISO(), items:[], totals:{subtotal:0,tax:0,total:0}, addons:[], expenses:[], engineer:null, notes:""};
+    function cA(a){ return Array.isArray(a)? a.map(function(o){ return Object.assign({}, o); }):[]; }
+    var T = { date: t.date, items: cA(t.items), addons: cA(t.addons), expenses: cA(t.expenses), engineer: t.engineer||null, notes: t.notes||"", totals: t.totals? Object.assign({}, t.totals): {subtotal:0,tax:0,total:0} };
+    T.items = T.items.map(function(it){ it = Object.assign({}, it); it.addons = cA(it.addons); return it; });
+    return T;
+  }
+  function loadTicketFor(ymd){
+    var t = getJSON('et_ticket_v14::'+ymd);
+    if (!t){
+      var hist = getJSON('et_history_v14')||[];
+      if (Array.isArray(hist)){
+        for (var i=0;i<hist.length;i++){
+          var h = hist[i]||{}; var d = h.date||h.day||(h.ticket&&h.ticket.date);
+          if (d === ymd){
+            t = { date: ymd, items: (h.items||h.services||h.claims||[]), totals: h.totals||{subtotal:0,tax:0,total:0}, addons:[], expenses:[], engineer:null, notes:"" };
+            break;
+          }
+        }
+      }
+    }
+    if (!t){ t = { date: ymd, items: [], totals:{subtotal:0,tax:0,total:0}, addons:[], expenses:[], engineer:null, notes:"" }; }
+    return deepCloneTicket(t);
+  }
+  function stateMatches(ymd, ticket){
+    try{
+      var s = window.__appState || window.state || null;
+      if (!s) return false;
+      if (s.date !== ymd) return false;
+      var a = Array.isArray(s.items)? s.items.length : -1;
+      var b = Array.isArray(ticket.items)? ticket.items.length : -2;
+      return a === b;
+    }catch(e){ return false; }
+  }
+  function applyViaHook(ymd, ticket){
+    if (typeof window.appLoadTicketForDate === 'function'){
+      window.__suppressDateReload = (ymd !== todayISO());
+      window.appLoadTicketForDate(ymd, ticket);
+      return true;
+    }
+    return false;
+  }
+  function applyDirect(ymd, ticket){
+    var s = window.__appState || window.state || null;
+    if (s && typeof window.renderTicket === 'function'){
+      try{
+        s.date = ymd;
+        s.items = Array.isArray(ticket.items)? ticket.items : [];
+        if (s.totals && ticket.totals) s.totals = Object.assign({}, ticket.totals);
+        if (typeof window.persist === 'function'){ try{ window.persist(); }catch(e){} }
+        if (typeof window.syncTodayToHistory === 'function'){ try{ window.syncTodayToHistory(); }catch(e){} }
+        window.renderTicket();
+        return true;
+      }catch(e){}
+    }
+    return false;
+  }
+  function enforce(ymd){
+    var ticket = loadTicketFor(ymd);
+    setJSON('et_ticket_v14', ticket); // seed base for hydrate
+    function attempt(){ if (!stateMatches(ymd, ticket)){ if (!applyViaHook(ymd, ticket)) applyDirect(ymd, ticket); } }
+    attempt();
+    requestAnimationFrame(attempt);
+    setTimeout(attempt, 50);
+    setTimeout(attempt, 200);
+    // Mutation observer watchdog (~900ms)
+    try{
+      var target = document.querySelector('#servicesList, .services, .service-list, [data-role="services-list"]') || document.body;
+      var changed=false;
+      var mo = new MutationObserver(function(){ changed=true; });
+      mo.observe(target, {childList:true, subtree:true});
+      setTimeout(function(){ try{ mo.disconnect(); }catch(e){}; if (!changed){ attempt(); if (typeof window.renderTicket==='function'){ try{ window.renderTicket(); }catch(e){} } } }, 900);
+    }catch(e){}
+    // touchend follow-up
+    var once = function(){ try{ document.removeEventListener('touchend', once, {passive:true}); }catch(e){ document.removeEventListener('touchend', once); } setTimeout(attempt, 30); };
+    try{ document.addEventListener('touchend', once, {passive:true, once:true}); }catch(e){ document.addEventListener('touchend', once, {passive:true}); }
+  }
+
+  // Install wrapper around existing applySelectedDate (only on iOS)
+  var installed = false;
+  function install(){
+    if (installed) return;
+    if (typeof window.applySelectedDate !== 'function') return;
+    var orig = window.applySelectedDate;
+    window.applySelectedDate = function(){
+      var ymdBefore = (typeof window.selectedDate === 'string') ? window.selectedDate : null;
+      var r = orig.apply(this, arguments);
+      var ymdAfter = (typeof window.selectedDate === 'string') ? window.selectedDate : ymdBefore;
+      if (ymdAfter) enforce(ymdAfter);
+      return r;
+    };
+    installed = true;
+  }
+  var tries = 0, t = setInterval(function(){
+    tries++;
+    try{ install(); }catch(e){}
+    if (installed || tries > 60) clearInterval(t);
+  }, 100);
+})();
+</script>
+</body>
+</html>

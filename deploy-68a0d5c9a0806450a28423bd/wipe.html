@@ -1,0 +1,14 @@
+<!doctype html><meta charset="utf-8"><title>Wipe</title>
+<script>
+(async () => {
+  try {
+    const regs = await navigator.serviceWorker.getRegistrations();
+    for (const r of regs) await r.unregister();
+  } catch(e){}
+  try {
+    const keys = await caches.keys();
+    for (const k of keys) await caches.delete(k);
+  } catch(e){}
+  document.body.innerHTML = '<p>Service worker & caches cleared. Close this tab and reopen the app.</p>';
+})();
+</script>

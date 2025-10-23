@@ -1,0 +1,4 @@
+*{print-color-adjust:exact;-webkit-print-color-adjust:exact}
+table{border-collapse:collapse}
+th,td{border:1px solid #ddd}
+h1,h2{margin:0 0 8px}
